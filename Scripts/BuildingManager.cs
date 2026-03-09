@@ -12,15 +12,11 @@ public class BuildingManager : MonoBehaviour
     public GameObject floorPrefab;
     public GameObject halfWallPrefab;
     public GameObject columnPrefab;
-    
-    [Header("🚪 НОВІ ПРЕФАБИ: Інтерактивні Об'єкти")]
-    public GameObject doorPrefab;
-    public GameObject torchPrefab;
 
     [Header("Візуал")]
     public Material hologramMaterial;
 
-    public enum BuildMode { None, Wall, Floor, HalfWall, Column, Door, Torch, Delete }
+    public enum BuildMode { None, Wall, Floor, HalfWall, Column, Delete }
     public BuildMode currentMode = BuildMode.None;
 
     private FirebaseFirestore db;
@@ -30,6 +26,7 @@ public class BuildingManager : MonoBehaviour
     private GridManager gridManager;
     private float currentRotation = 0f;
 
+    // ЗМІННІ ДЛЯ МАСОВОГО БУДІВНИЦТВА (Drag & Build)
     private bool isDragging = false;
     private Vector3 dragStartPos;
     private List<GameObject> dragPreviews = new List<GameObject>();
@@ -48,6 +45,7 @@ public class BuildingManager : MonoBehaviour
     {
         if (currentMode == BuildMode.None) return;
 
+        // Скасування будівництва
         if (Input.GetKeyDown(KeyCode.Escape) || Input.GetMouseButtonDown(1))
         {
             if (isDragging) { isDragging = false; ClearPreviews(); return; }
@@ -61,6 +59,7 @@ public class BuildingManager : MonoBehaviour
             return;
         }
 
+        // Обертання
         if (Input.GetKeyDown(KeyCode.R) && !isDragging)
         {
             currentRotation += 90f;
@@ -69,48 +68,43 @@ public class BuildingManager : MonoBehaviour
 
         if (GetBuildHit(out Vector3 hitPoint, out Vector3 hitNormal))
         {
-            float cs = gridManager.CellSize;
-            
-            // ✅ ВИПРАВЛЕНО: Snap до сітки БЕЗ додавання GetYOffset тут!
-            Vector3 snappedPos = new Vector3(
-                Mathf.Round(hitPoint.x / cs) * cs,
-                hitPoint.y,  // Використовуємо Y з raycast
-                Mathf.Round(hitPoint.z / cs) * cs
-            );
-            
-            // ✅ НОВА ЛОГІКА: Додаємо offset залежно від того, на що клікнули
-            snappedPos = AdjustHeightForSurface(snappedPos, hitPoint, hitNormal);
+            Vector3 placePos = hitPoint + hitNormal * 0.1f;
+            Vector3 snappedPos = gridManager.SnapToGrid(placePos);
 
-            List<Vector3> dragPoints = new List<Vector3>();
-            bool allowDrag = (currentMode != BuildMode.Door && currentMode != BuildMode.Torch);
+            float snappedY = Mathf.Floor(placePos.y * 2f) / 2f;
+            float yOffset = GetYOffset();
+            snappedPos.y = snappedY + yOffset;
 
-            if (allowDrag && Input.GetMouseButtonDown(0) && !isDragging)
+            // ПОЧАТОК ВИДІЛЕННЯ РАМКИ
+            if (Input.GetMouseButtonDown(0))
             {
                 isDragging = true;
                 dragStartPos = snappedPos;
             }
 
-            if (allowDrag && isDragging)
+            // ПІД ЧАС ВИДІЛЕННЯ (Малюємо голограми)
+            if (isDragging)
             {
-                bool isHollow = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
-                dragPoints = GetDragPositions(dragStartPos, snappedPos, isHollow);
+                bool hollow = Input.GetKey(KeyCode.LeftShift); // Затиснутий Shift = порожній центр
+
+                // Фіксуємо висоту по стартовій точці, щоб можна було будувати рівні мости/дахи
+                Vector3 dragEndPos = new Vector3(snappedPos.x, dragStartPos.y, snappedPos.z);
+
+                List<Vector3> dragPoints = GetDragPositions(dragStartPos, dragEndPos, hollow);
                 UpdatePreviews(dragPoints);
 
+                // КІНЕЦЬ ВИДІЛЕННЯ (Відпускаємо кнопку - Будуємо!)
                 if (Input.GetMouseButtonUp(0))
                 {
                     isDragging = false;
                     CommitBatchAction(dragPoints);
-                    ClearPreviews();
+                    ClearPreviews(); // Очищаємо екран після будівництва
                 }
             }
             else
             {
+                // Режим прицілу (один блок)
                 UpdatePreviews(new List<Vector3> { snappedPos });
-                
-                if ((currentMode == BuildMode.Door || currentMode == BuildMode.Torch) && Input.GetMouseButtonDown(0))
-                {
-                    CommitBatchAction(new List<Vector3> { snappedPos });
-                }
             }
         }
         else
@@ -119,42 +113,7 @@ public class BuildingManager : MonoBehaviour
         }
     }
 
-    // ✅ НОВА ФУНКЦІЯ: Розумне визначення висоти залежно від поверхні
-    Vector3 AdjustHeightForSurface(Vector3 basePos, Vector3 hitPoint, Vector3 hitNormal)
-    {
-        // Якщо клік по верхній поверхні (нормаль дивиться вгору)
-        if (hitNormal.y > 0.5f)
-        {
-            // Будуємо ЗВЕРХУ на об'єкт
-            basePos.y = hitPoint.y + GetYOffset();
-        }
-        // Якщо клік по нижній поверхні (нормаль дивиться вниз)
-        else if (hitNormal.y < -0.5f)
-        {
-            // Будуємо ЗНИЗУ під об'єкт
-            basePos.y = hitPoint.y - GetObjectHeight() + GetYOffset();
-        }
-        else
-        {
-            // Клік по боковій поверхні - ставимо на рівні кліка
-            basePos.y = hitPoint.y + GetYOffset();
-        }
-        
-        return basePos;
-    }
-
-    // ✅ НОВА ФУНКЦІЯ: Висота поточного об'єкта
-    float GetObjectHeight()
-    {
-        if (currentMode == BuildMode.Wall) return 2f;
-        if (currentMode == BuildMode.HalfWall) return 1f;
-        if (currentMode == BuildMode.Column) return 2f;
-        if (currentMode == BuildMode.Door) return 2f;
-        if (currentMode == BuildMode.Torch) return 1f;
-        if (currentMode == BuildMode.Floor) return 0.05f;
-        return 0f;
-    }
-
+    // МАТЕМАТИКА РАМКИ: Отримуємо всі клітинки між стартом і кінцем
     List<Vector3> GetDragPositions(Vector3 start, Vector3 end, bool hollow)
     {
         List<Vector3> positions = new List<Vector3>();
@@ -169,19 +128,22 @@ public class BuildingManager : MonoBehaviour
         {
             for (float z = minZ; z <= maxZ + 0.01f; z += cs)
             {
+                // Якщо увімкнено Hollow (Shift), перевіряємо, чи це край зони
                 bool isBorder = Mathf.Abs(x - minX) < 0.01f || Mathf.Abs(x - maxX) < 0.01f ||
                                 Mathf.Abs(z - minZ) < 0.01f || Mathf.Abs(z - maxZ) < 0.01f;
 
-                if (hollow && !isBorder) continue;
+                if (hollow && !isBorder) continue; // Пропускаємо середину
 
-                positions.Add(new Vector3(x, start.y, z));
+                positions.Add(new Vector3(x, start.y, z)); // Висота завжди фіксована по старту
             }
         }
         return positions;
     }
 
+    // ОНОВЛЕННЯ ГОЛОГРАМ (Розумний пул об'єктів)
     void UpdatePreviews(List<Vector3> positions)
     {
+        // Додаємо нові голограми, якщо не вистачає
         while (dragPreviews.Count < positions.Count)
         {
             GameObject p = InstantiatePreviewPrefab();
@@ -189,6 +151,7 @@ public class BuildingManager : MonoBehaviour
             else break;
         }
 
+        // Розставляємо і фарбуємо їх
         for (int i = 0; i < dragPreviews.Count; i++)
         {
             if (i < positions.Count)
@@ -198,11 +161,11 @@ public class BuildingManager : MonoBehaviour
                 dragPreviews[i].transform.rotation = Quaternion.Euler(0, currentRotation, 0);
 
                 bool canBuild = CanBuildHere(positions[i]);
-                if (currentMode == BuildMode.Delete) canBuild = true;
+                if (currentMode == BuildMode.Delete) canBuild = true; // Видаляти можна завжди
 
                 Color tintColor;
-                if (currentMode == BuildMode.Delete) tintColor = new Color(1f, 0f, 0f, 0.4f);
-                else tintColor = canBuild ? new Color(0f, 1f, 0f, 0.4f) : new Color(1f, 0f, 0f, 0.4f);
+                if (currentMode == BuildMode.Delete) tintColor = new Color(1f, 0f, 0f, 0.4f); // Червоний для видалення
+                else tintColor = canBuild ? new Color(0f, 1f, 0f, 0.4f) : new Color(1f, 0f, 0f, 0.4f); // Зелений/Червоний для будівництва
 
                 Renderer[] renderers = dragPreviews[i].GetComponentsInChildren<Renderer>();
                 foreach (var r in renderers)
@@ -213,13 +176,15 @@ public class BuildingManager : MonoBehaviour
             }
             else
             {
-                dragPreviews[i].SetActive(false);
+                dragPreviews[i].SetActive(false); // Ховаємо зайві
             }
         }
     }
 
+    // ФІНАЛЬНИЙ ЗАПИС У FIREBASE (Batch - пакетом)
     void CommitBatchAction(List<Vector3> positions)
     {
+        // ВИПРАВЛЕНО: У Unity C# ця функція називається StartBatch(), а не Batch()!
         WriteBatch batch = db.StartBatch();
         int operationsCount = 0;
 
@@ -227,6 +192,7 @@ public class BuildingManager : MonoBehaviour
         {
             if (currentMode == BuildMode.Delete)
             {
+                // Шукаємо будівлю в цій точці
                 Vector3 halfExtents = new Vector3(0.45f, 0.45f, 0.45f);
                 Collider[] hits = Physics.OverlapBox(pos, halfExtents, Quaternion.identity);
                 foreach (var hit in hits)
@@ -241,16 +207,13 @@ public class BuildingManager : MonoBehaviour
             }
             else
             {
+                // Будуємо, якщо місце вільне
                 if (CanBuildHere(pos))
                 {
                     string bID = "build_" + Guid.NewGuid().ToString().Substring(0, 6);
                     var data = new Dictionary<string, object>
                     {
-                        { "type", (int)currentMode }, 
-                        { "x", pos.x }, 
-                        { "y", pos.y }, 
-                        { "z", pos.z }, 
-                        { "rot", currentRotation }
+                        { "type", (int)currentMode }, { "x", pos.x }, { "y", pos.y }, { "z", pos.z }, { "rot", currentRotation }
                     };
                     DocumentReference docRef = db.Collection("Worlds").Document(worldID).Collection("Buildings").Document(bID);
                     batch.Set(docRef, data);
@@ -259,6 +222,7 @@ public class BuildingManager : MonoBehaviour
             }
         }
 
+        // Відправляємо весь масив даних одним махом
         if (operationsCount > 0)
         {
             batch.CommitAsync();
@@ -273,42 +237,24 @@ public class BuildingManager : MonoBehaviour
         else if (currentMode == BuildMode.Floor) prefab = floorPrefab;
         else if (currentMode == BuildMode.HalfWall) prefab = halfWallPrefab;
         else if (currentMode == BuildMode.Column) prefab = columnPrefab;
-        else if (currentMode == BuildMode.Door) prefab = doorPrefab;
-        else if (currentMode == BuildMode.Torch) prefab = torchPrefab;
-        else if (currentMode == BuildMode.Delete) prefab = floorPrefab;
+        else if (currentMode == BuildMode.Delete) prefab = floorPrefab; // Квадрат для зони видалення
 
         if (prefab != null)
         {
             GameObject obj = Instantiate(prefab);
-            
-            if (currentMode == BuildMode.Door)
-            {
-                var doorScript = obj.GetComponent<InteractiveDoor>();
-                if (doorScript != null) Destroy(doorScript);
-            }
-            if (currentMode == BuildMode.Torch)
-            {
-                var torchScript = obj.GetComponent<InteractiveTorch>();
-                if (torchScript != null) Destroy(torchScript);
-            }
-            
             Destroy(obj.GetComponent<Collider>());
-            foreach (var r in obj.GetComponentsInChildren<Renderer>()) 
-                if (hologramMaterial != null) r.material = hologramMaterial;
+            foreach (var r in obj.GetComponentsInChildren<Renderer>()) if (hologramMaterial != null) r.material = hologramMaterial;
             return obj;
         }
         return null;
     }
 
-    // ✅ ВИПРАВЛЕНО: Повернув старі offset значення для стін/підлоги
     float GetYOffset()
     {
-        if (currentMode == BuildMode.Wall) return 1f;           // Стіна - центр на висоті 1м
-        if (currentMode == BuildMode.HalfWall) return 0.5f;     // Напівстіна
-        if (currentMode == BuildMode.Floor) return 0.025f;      // Підлога - тонка
-        if (currentMode == BuildMode.Column) return 1f;         // Колона
-        if (currentMode == BuildMode.Door) return 0f;           // 🚪 Двері - на рівні підлоги (0, не 0.5!)
-        if (currentMode == BuildMode.Torch) return 0.5f;        // 🔥 Факел - трохи вище підлоги
+        if (currentMode == BuildMode.Wall) return 1f;
+        if (currentMode == BuildMode.HalfWall) return 0.5f;
+        if (currentMode == BuildMode.Floor) return 0.025f;
+        if (currentMode == BuildMode.Column) return 1f;
         if (currentMode == BuildMode.Delete) return 0.025f;
         return 0f;
     }
@@ -334,8 +280,6 @@ public class BuildingManager : MonoBehaviour
         else if (currentMode == BuildMode.HalfWall) halfExtents = new Vector3(0.45f, 0.45f, 0.45f);
         else if (currentMode == BuildMode.Floor) halfExtents = new Vector3(0.45f, 0.02f, 0.45f);
         else if (currentMode == BuildMode.Column) halfExtents = new Vector3(0.1f, 0.95f, 0.1f);
-        else if (currentMode == BuildMode.Door) halfExtents = new Vector3(0.45f, 0.95f, 0.1f);
-        else if (currentMode == BuildMode.Torch) halfExtents = new Vector3(0.2f, 0.9f, 0.2f);
 
         Collider[] hits = Physics.OverlapBox(checkPos, halfExtents, Quaternion.Euler(0, currentRotation, 0));
         foreach (var hit in hits) if (hit.name.StartsWith("build_")) return false;
@@ -361,16 +305,10 @@ public class BuildingManager : MonoBehaviour
                     else if (type == (int)BuildMode.Floor) prefabToSpawn = floorPrefab;
                     else if (type == (int)BuildMode.HalfWall) prefabToSpawn = halfWallPrefab;
                     else if (type == (int)BuildMode.Column) prefabToSpawn = columnPrefab;
-                    else if (type == (int)BuildMode.Door) prefabToSpawn = doorPrefab;
-                    else if (type == (int)BuildMode.Torch) prefabToSpawn = torchPrefab;
 
                     if (prefabToSpawn != null)
                     {
-                        GameObject newObj = Instantiate(
-                            prefabToSpawn, 
-                            new Vector3(Convert.ToSingle(data["x"]), Convert.ToSingle(data["y"]), Convert.ToSingle(data["z"])), 
-                            Quaternion.Euler(0, rot, 0)
-                        );
+                        GameObject newObj = Instantiate(prefabToSpawn, new Vector3(Convert.ToSingle(data["x"]), Convert.ToSingle(data["y"]), Convert.ToSingle(data["z"])), Quaternion.Euler(0, rot, 0));
                         newObj.name = doc.Id;
                         builtObjects.Add(doc.Id, newObj);
                     }
@@ -392,9 +330,8 @@ public class BuildingManager : MonoBehaviour
     public void SetModeFloor() { currentMode = BuildMode.Floor; currentRotation = 0f; ClearPreviews(); ClearTokens(); }
     public void SetModeHalfWall() { currentMode = BuildMode.HalfWall; currentRotation = 0f; ClearPreviews(); ClearTokens(); }
     public void SetModeColumn() { currentMode = BuildMode.Column; currentRotation = 0f; ClearPreviews(); ClearTokens(); }
-    public void SetModeDoor() { currentMode = BuildMode.Door; currentRotation = 0f; ClearPreviews(); ClearTokens(); }
-    public void SetModeTorch() { currentMode = BuildMode.Torch; currentRotation = 0f; ClearPreviews(); ClearTokens(); }
     public void SetModeDelete() { currentMode = BuildMode.Delete; ClearPreviews(); ClearTokens(); }
+
     public void SetModeNone() { currentMode = BuildMode.None; isDragging = false; ClearPreviews(); }
 
     void ClearTokens()
